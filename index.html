@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<title>Real-time WAV Recorder</title>
+</head>
+<body>
+<button id="startRecording">Start Recording</button>
+<button id="stopRecording" disabled>Stop Recording</button>
+
+<script>
+	const startRecording = document.getElementById('startRecording')
+	const stopRecording = document.getElementById('stopRecording')
+	
+	let audioContext
+	let mediaStream
+	let ws
+	
+	async function start() {
+		const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } }
+		try {
+			let canSendNext = 0
+			// 实时解析很难做到毫秒级解析，使用数组模拟队列存储异步数据
+			const queues = []
+			
+			mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
+			console.log('开始录音...')
+			audioContext = new AudioContext({ sampleRate: 16000 })
+			let sourceNode = audioContext.createMediaStreamSource(mediaStream)
+			
+			// 2048约128ms毫秒生成一段pcm
+			let processorNode = audioContext.createScriptProcessor(2048, 1, 1)
+			
+			processorNode.onaudioprocess = (event) => {
+				const audioData = event.inputBuffer.getChannelData(0)
+				const int16Data = new Int16Array(audioData.map((sample) => sample * 32767))
+				
+				if (canSendNext > 0) {
+					if (queues.length > 0) {
+						queues.push(int16Data)
+						ws.send(queues.shift())
+					} else {
+						ws.send(int16Data)
+					}
+					console.log('发送了一段pcm数据...', queues.length)
+					canSendNext--
+				}
+			}
+			sourceNode.connect(processorNode)
+			processorNode.connect(audioContext.destination)
+			
+			ws = new WebSocket('ws://172.20.0.158:1000/asr/streaming')
+			ws.addEventListener('open', () => {
+				ws.send(JSON.stringify({ 'signal': 'start' }))
+			})
+			ws.addEventListener('message', (event) => {
+				try {
+					const obj = JSON.parse(event.data + '')
+					if (!obj.status && typeof obj.result !== 'undefined') {
+						console.log('当前识别结果: ', obj.result)
+						canSendNext++
+						return
+					}
+					if (obj.status !== 'ok') {
+						console.log('error: ', data)
+						return
+					}
+					if (obj.signal === 'server_ready') {
+						canSendNext++
+					} else if (obj.signal === 'finished') {
+						console.log('识别完了...')
+						console.log(obj.result)
+						console.log(obj.times)
+					} else {
+						console.log('消息: ', obj.message)
+					}
+					
+				} catch {}
+			})
+			ws.addEventListener('close', () => {
+				console.log('WebSocket connection closed')
+			})
+			
+			stopRecording.disabled = false
+			startRecording.disabled = true
+		} catch (error) {
+			console.error('Error:', error)
+		}
+	}
+	
+	function stop() {
+		if (audioContext) {
+			audioContext.close()
+			mediaStream.getTracks().forEach((track) => track.stop())
+		}
+		
+		if (ws) {
+			try {
+				ws.send(JSON.stringify({ 'signal': 'end' }), () => ws.close())
+			} catch {}
+		}
+		
+		stopRecording.disabled = true
+		startRecording.disabled = false
+	}
+	
+	startRecording.addEventListener('click', start)
+	stopRecording.addEventListener('click', stop)
+
+</script>
+</body>
+</html>
